@@ -1,0 +1,9 @@
+{
+  "_comment": "Downstream MCP servers to proxy. Reuses the standard Claude Code `mcpServers` shape - paste an existing config here. stdio servers use command/args/env; remote servers use url.",
+  "mcpServers": {
+    "cavemem": {
+      "command": "node",
+      "args": ["/opt/homebrew/lib/node_modules/cavemem/dist/index.js", "mcp"]
+    }
+  }
+}
