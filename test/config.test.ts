@@ -26,6 +26,37 @@ describe("parseConfig", () => {
     ]);
   });
 
+  it("parses an http server with static headers", () => {
+    const result = parseConfig(
+      JSON.stringify({
+        mcpServers: {
+          api: {
+            url: "https://example.com/mcp",
+            headers: { Authorization: "Bearer secret" },
+          },
+        },
+      }),
+    );
+    expect(result).toEqual([
+      {
+        name: "api",
+        url: "https://example.com/mcp",
+        headers: { Authorization: "Bearer secret" },
+      },
+    ]);
+  });
+
+  it("ignores non-string-valued headers", () => {
+    const [server] = parseConfig(
+      JSON.stringify({
+        mcpServers: {
+          api: { url: "https://example.com/mcp", headers: { bad: 123 } },
+        },
+      }),
+    );
+    expect(server?.headers).toBeUndefined();
+  });
+
   it("ignores keys beginning with underscore", () => {
     const result = parseConfig(
       JSON.stringify({

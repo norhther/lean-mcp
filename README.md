@@ -26,8 +26,10 @@ This is a working PoC demonstrating the idea end-to-end:
 - ✅ Retro-compatible (dual MCP role: server + client)
 - ✅ 5 fixed meta-tools that collapse N downstream definitions
 - ✅ BM25 search, on-demand schema inspection, result reduction
+- ✅ Remote MCP servers — static token headers + full OAuth 2.0 (PKCE,
+  dynamic client registration, automatic token refresh)
 - ✅ Token savings proven (85% definition, 92% result)
-- ✅ 63 unit + integration tests, 91.5% coverage
+- ✅ 95 unit + integration tests, 92% coverage
 - ⚠️ In-memory result storage only (TTL-based eviction)
 - ⚠️ No persistence layer or clustering
 - ⚠️ Result summarization uses Claude Haiku; no pluggable summarizer
@@ -146,10 +148,22 @@ Configure downstream servers in `lean-mcp.config.json`. It reuses the standard
 {
   "mcpServers": {
     "github":  { "command": "npx", "args": ["-y", "@modelcontextprotocol/server-github"] },
-    "tracker": { "url": "https://example.com/mcp" }
+    "tracker": { "url": "https://example.com/mcp" },
+    "api":     { "url": "https://api.example.com/mcp", "headers": { "Authorization": "Bearer YOUR_TOKEN" } }
   }
 }
 ```
+
+Three server kinds are supported:
+
+- **stdio** — local subprocess (`command` + `args`).
+- **remote, static token** — an HTTP `url` plus `headers`. The header set
+  (a bearer token, API key, etc.) is sent on every request. Keep this config
+  file out of version control if it carries a real token.
+- **remote, OAuth** — an HTTP `url` with no `headers`. The gateway attaches an
+  OAuth client and uses tokens cached by the `auth` command (see below). A
+  `url` server with no headers and no cached tokens simply connects
+  unauthenticated, which is correct for public servers.
 
 Run the gateway (stdio):
 
@@ -176,6 +190,28 @@ The config path may also be set via `LEAN_MCP_CONFIG`. Set `ANTHROPIC_API_KEY`
 to enable LLM summarization of oversized results; without it the gateway
 truncates instead.
 
+## Authenticating remote servers (OAuth)
+
+For a remote server that speaks OAuth 2.0, run the one-time auth flow:
+
+```bash
+npm run build
+node dist/server.js auth <server-name> [config-path]
+```
+
+This:
+1. Starts a temporary loopback callback server on an ephemeral port.
+2. Discovers the server's authorization server (RFC 9728 / RFC 8414) and
+   dynamically registers `lean-mcp` as an OAuth client (RFC 7591).
+3. Opens your browser to the consent screen.
+4. Catches the redirect, exchanges the code (PKCE), and caches the tokens.
+
+Tokens and client credentials are stored under `~/.lean-mcp/<server>.json`
+(directory `0700`, files `0600`) — never in the repo, never in the config
+file. Once cached, the gateway loads them on startup and refreshes the access
+token automatically when it expires. If a server needs auth and has no cached
+tokens, it shows up degraded in `list_servers` with the exact command to fix.
+
 ## Future work
 
 Ideas for moving this from PoC to production:
@@ -188,13 +224,14 @@ Ideas for moving this from PoC to production:
   client sessions (or replicate state across instances).
 - **Fallback chains**: if tracker server is down, try a backup; queue tool calls
   for later retry.
-- **Authentication**: support injecting OAuth tokens, API keys, etc. for
-  downstream servers.
+- **Credential encryption**: cached tokens in `~/.lean-mcp/` are plaintext
+  JSON protected only by file permissions; production should encrypt at rest
+  or use an OS keychain.
 
 ## Develop
 
 ```bash
-npm test                  # 63 tests across 9 files
+npm test                  # 95 tests across 12 files
 npm run test -- --coverage
 npm run bench             # token-savings benchmark
 ```
@@ -211,6 +248,9 @@ src/
   result-store.ts  out-of-context result storage, handle + paging
   summarizer.ts    over-budget result reduction (LLM, with truncation fallback)
   config.ts        mcpServers config parsing
+  oauth.ts         file-backed OAuthClientProvider for remote servers
+  oauth-store.ts   token + client-credential storage (~/.lean-mcp/)
+  auth-command.ts  `lean-mcp auth` interactive OAuth flow
   tokens.ts        token estimation
 test/
   fixtures/fake-server.ts   a realistic downstream MCP server
@@ -263,12 +303,14 @@ server.
   deterministic head/tail truncation. The model won't know which reduction
   strategy was used (truncated vs. llm is reported, but not the reason).
 
-**OAuth-protected downstreams**:
-- Remote servers that require OAuth (Google, Notion, Slack) can be proxied if
-  the gateway can hold valid tokens. But the config doesn't support storing
-  credentials. You'd need to inject tokens via environment or a secrets manager,
-  then pass them to the downstream's client.
-- The demo and benchmark only test stdio servers (local processes).
+**Remote / OAuth downstreams**:
+- Static-token and OAuth 2.0 servers are both supported (see "Authenticating
+  remote servers"). OAuth tokens are cached in `~/.lean-mcp/`.
+- Token refresh is automatic, but a *full* re-authorization is not: if the
+  refresh token expires or is revoked, the server goes degraded and you must
+  re-run `lean-mcp auth <server>`. The gateway never opens a browser on its own.
+- The demo and benchmark still exercise only stdio servers; the OAuth path is
+  covered by unit tests, not an end-to-end live server.
 
 **Single-process**:
 - This PoC runs as a single process with no clustering. If load is high or

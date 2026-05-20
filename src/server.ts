@@ -6,6 +6,7 @@ import { ClientPool } from "./client-pool.js";
 import { ToolRegistry } from "./registry.js";
 import { ResultStore } from "./result-store.js";
 import { MetaTools, registerMetaTools } from "./meta-tools.js";
+import { runAuthCommand } from "./auth-command.js";
 
 const DEFAULT_CONFIG = "lean-mcp.config.json";
 
@@ -14,9 +15,25 @@ function log(message: string): void {
   process.stderr.write(`[lean-mcp] ${message}\n`);
 }
 
+/** `lean-mcp auth <server> [config]` — interactive OAuth for one server. */
+async function authSubcommand(args: string[]): Promise<void> {
+  const serverName = args[0];
+  if (!serverName) {
+    log("usage: lean-mcp auth <server> [config-path]");
+    process.exit(1);
+  }
+  const configPath = args[1] ?? process.env.LEAN_MCP_CONFIG ?? DEFAULT_CONFIG;
+  await runAuthCommand(serverName, configPath, log);
+}
+
 async function main(): Promise<void> {
-  const configPath =
-    process.argv[2] ?? process.env.LEAN_MCP_CONFIG ?? DEFAULT_CONFIG;
+  const argv = process.argv.slice(2);
+  if (argv[0] === "auth") {
+    await authSubcommand(argv.slice(1));
+    process.exit(0);
+  }
+
+  const configPath = argv[0] ?? process.env.LEAN_MCP_CONFIG ?? DEFAULT_CONFIG;
   const servers = loadConfig(configPath);
   log(`loading ${servers.length} downstream server(s) from ${configPath}`);
 

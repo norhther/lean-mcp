@@ -4,6 +4,9 @@
     "cavemem": {
       "command": "node",
       "args": ["/opt/homebrew/lib/node_modules/cavemem/dist/index.js", "mcp"]
+    },
+    "notion": {
+      "url": "https://mcp.notion.com/mcp"
     }
   }
 }

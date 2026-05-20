@@ -6,6 +6,7 @@ import {
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
 import type { ServerConfig, ServerStatus, ToolEntry } from "./types.js";
+import { gatewayOAuthProvider } from "./oauth.js";
 
 /** Raw content blocks as returned by a downstream MCP tool call. */
 export interface DownstreamResult {
@@ -24,7 +25,17 @@ interface Connection {
 
 function makeTransport(config: ServerConfig): Transport {
   if (config.url) {
-    return new StreamableHTTPClientTransport(new URL(config.url));
+    // static headers (bearer/API key) take precedence and skip OAuth entirely
+    if (config.headers) {
+      return new StreamableHTTPClientTransport(new URL(config.url), {
+        requestInit: { headers: config.headers },
+      });
+    }
+    // otherwise attach an OAuth provider: harmless for public servers, and it
+    // supplies + silently refreshes cached tokens for protected ones
+    return new StreamableHTTPClientTransport(new URL(config.url), {
+      authProvider: gatewayOAuthProvider(config.name),
+    });
   }
   if (config.command) {
     return new StdioClientTransport({

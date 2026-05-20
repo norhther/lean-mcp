@@ -37,7 +37,11 @@ export function parseConfig(raw: string): ServerConfig[] {
     const def = definition as Record<string, unknown>;
 
     if (typeof def.url === "string") {
-      result.push({ name, url: def.url });
+      result.push({
+        name,
+        url: def.url,
+        headers: isStringRecord(def.headers) ? def.headers : undefined,
+      });
     } else if (typeof def.command === "string") {
       result.push({
         name,

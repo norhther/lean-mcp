@@ -16,6 +16,12 @@ export interface ServerConfig {
   args?: string[];
   env?: Record<string, string>;
   url?: string;
+  /**
+   * Static request headers for an HTTP server (e.g. a bearer token or API
+   * key). When set, the gateway sends them on every request and does NOT
+   * attach an OAuth provider — this is the "static token" auth tier.
+   */
+  headers?: Record<string, string>;
 }
 
 /** Connection state of one downstream server. */

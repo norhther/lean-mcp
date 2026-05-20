@@ -35,6 +35,34 @@ describe("ClientPool", () => {
     );
   });
 
+  it("builds an http transport for a url server with static headers", async () => {
+    const pool = new ClientPool();
+    await pool.connectAll([
+      {
+        name: "api",
+        url: "http://127.0.0.1:9/mcp",
+        headers: { Authorization: "Bearer x" },
+      },
+    ]);
+    expect(pool.statuses()[0]).toMatchObject({
+      name: "api",
+      transport: "http",
+      connected: false,
+    });
+    await pool.close();
+  });
+
+  it("attaches an oauth provider for a url server without headers", async () => {
+    const pool = new ClientPool();
+    await pool.connectAll([{ name: "remote", url: "http://127.0.0.1:9/mcp" }]);
+    expect(pool.statuses()[0]).toMatchObject({
+      name: "remote",
+      transport: "http",
+      connected: false,
+    });
+    await pool.close();
+  });
+
   it("closes cleanly with no connections", async () => {
     await expect(new ClientPool().close()).resolves.toBeUndefined();
   });
