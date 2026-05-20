@@ -19,6 +19,66 @@ oversized results are summarized with the full text held retrievable.
 It is **retro-compatible**: to the host it is a vanilla MCP server; to each
 downstream it is a vanilla MCP client. Neither side needs to change.
 
+## Status: Proof of Concept
+
+This is a working PoC demonstrating the idea end-to-end:
+
+- ✅ Retro-compatible (dual MCP role: server + client)
+- ✅ 5 fixed meta-tools that collapse N downstream definitions
+- ✅ BM25 search, on-demand schema inspection, result reduction
+- ✅ Token savings proven (85% definition, 92% result)
+- ✅ 63 unit + integration tests, 91.5% coverage
+- ⚠️ In-memory result storage only (TTL-based eviction)
+- ⚠️ No persistence layer or clustering
+- ⚠️ Result summarization uses Claude Haiku; no pluggable summarizer
+- ⚠️ Not optimized for production scale (single process, no caching beyond result store)
+
+**What it proves**: The idea works. Schemas don't need to bloat context, and
+result reduction is practical. Retro-compatibility is achievable.
+
+**What's missing for production**: persistence, distributed caching, pluggable
+summarization, metrics, graceful degradation under load.
+
+## How It Works
+
+### Two bloats, two fixes
+
+**Definition bloat**: Normally, every downstream tool's full JSON schema is
+injected into the model's context before it does anything. 50 tools = 50 schema
+objects, even if the model only needs 2.
+
+**Fix**: lean-mcp exposes 5 fixed meta-tools. Downstream schemas live in a BM25
+index. The model:
+1. `search_tools "create issue"` → gets ranked hits (server, name, one-liner)
+2. `inspect_tool "tracker" "create_issue"` → gets full schema (only when needed)
+3. `call_tool "tracker" "create_issue" {...}` → invokes it
+
+Schemas are never precomputed in context. They're queried on demand.
+
+**Result bloat**: A single tool call can dump 26K tokens (a build log, a file
+dump, a verbose API response). All of it lands in context, squeezing out actual
+reasoning.
+
+**Fix**: `call_tool` returns a summary (context-sized) and a handle. The model
+can page the full result via `read_result` only if needed. Oversized results
+are summarized by Claude Haiku (or head/tail-truncated if no API key).
+
+### Why retro-compatible
+
+The magic: the gateway is **both** an MCP server (facing the host) and an MCP
+client (facing each downstream). To the host it looks like a normal MCP server
+with 5 tools. To each downstream it looks like a normal MCP client. Neither side
+needs changes.
+
+When the host calls `call_tool "tracker" "create_issue"`:
+1. Gateway's `call_tool` handler receives the call.
+2. It validates args against the schema (stored in registry, not in context).
+3. It forwards the call to the tracker server as a normal MCP callTool.
+4. It receives the result, summarizes it, stores it, returns it.
+
+The downstream has no idea it's being proxied. The host has no idea downstream
+schemas aren't preloaded. That abstraction layer is transparent.
+
 ## Results
 
 From `npm run bench` (3 downstream servers, 36 tools):
@@ -116,6 +176,21 @@ The config path may also be set via `LEAN_MCP_CONFIG`. Set `ANTHROPIC_API_KEY`
 to enable LLM summarization of oversized results; without it the gateway
 truncates instead.
 
+## Future work
+
+Ideas for moving this from PoC to production:
+
+- **Persistent result store**: swap in-memory store for Redis or a local DB.
+- **Semantic search**: add embeddings + vector similarity to `search_tools`.
+- **Pluggable summarizers**: let users swap Haiku for other models, or custom logic.
+- **Metrics**: emit token counts, search latency, cache stats.
+- **Clustering**: multiple gateway instances with a shared result store and sticky
+  client sessions (or replicate state across instances).
+- **Fallback chains**: if tracker server is down, try a backup; queue tool calls
+  for later retry.
+- **Authentication**: support injecting OAuth tokens, API keys, etc. for
+  downstream servers.
+
 ## Develop
 
 ```bash
@@ -143,12 +218,68 @@ test/
 bench/benchmark.ts          token-savings measurement
 ```
 
+## Understanding the code
+
+Entry points:
+- `src/server.ts` — the gateway process. Loads config, connects to downstreams,
+  registers the 5 meta-tools, listens on stdio.
+- `src/meta-tools.ts` — the 5 meta-tools logic. Pure, testable functions that
+  implement search, inspect, call, read, and list.
+
+Key modules:
+- `registry.ts` — BM25-indexed, flattened tool set. `search()` returns ranked
+  hits; `get()` returns full entry.
+- `client-pool.ts` — N MCP clients (one per downstream). Each client is owned
+  by a Connection that tracks state. A failed connection is marked degraded but
+  doesn't crash the pool.
+- `result-store.ts` — in-memory map of handles → content. TTL-based and
+  max-entries eviction. Returns pages on demand.
+- `summarizer.ts` — async function that takes oversized content and returns
+  summarized or truncated text. Uses Claude Haiku if API key is present, else
+  truncates (head/tail).
+- `config.ts` — parses the `mcpServers` config shape, same as Claude Code uses.
+
+Integration test (`test/integration.test.ts`) is a good place to see the full
+flow: host ← in-memory transport → gateway ← real subprocess → fake downstream
+server.
+
 ## Limitations
 
-- A failed-to-summarize result truncates rather than erroring — the model can
-  still page the full text via `read_result`, but a summary is better.
-- Remote OAuth-protected servers (Google, Notion, Slack) need their own auth
-  flow to proxy; the demo and benchmark use stdio servers.
-- BM25 search is lexical. A tool whose description shares no words with the
-  query will not surface — descriptions should use the vocabulary a caller
-  would search for.
+**In-memory storage**:
+- Result handles expire (30 min TTL, 100 max entries). For a long-running host,
+  a model might try to page a result that's already evicted. It will get an
+  error and need to re-run the original tool.
+
+**Search quality**:
+- BM25 is lexical. A tool description that uses different vocabulary than a
+  search query won't surface. E.g., `"send a message"` won't find a tool named
+  `"post_comment"` unless the description uses both "send" and "message" or
+  "post" and "comment".
+- No semantic search (would need embeddings + vector DB).
+
+**Summarization**:
+- Uses Claude Haiku only. No pluggable summarizer strategy.
+- If Haiku is down or the API key is invalid, the gateway falls back to
+  deterministic head/tail truncation. The model won't know which reduction
+  strategy was used (truncated vs. llm is reported, but not the reason).
+
+**OAuth-protected downstreams**:
+- Remote servers that require OAuth (Google, Notion, Slack) can be proxied if
+  the gateway can hold valid tokens. But the config doesn't support storing
+  credentials. You'd need to inject tokens via environment or a secrets manager,
+  then pass them to the downstream's client.
+- The demo and benchmark only test stdio servers (local processes).
+
+**Single-process**:
+- This PoC runs as a single process with no clustering. If load is high or
+  uptime matters, you'd need a reverse-proxy (e.g., multiple gateway instances
+  behind nginx) and a shared result store (Redis).
+
+**No metrics**:
+- The gateway logs to stderr but doesn't emit metrics (token counts, search
+  latency, cache hit rate, summarization time). Production would want
+  Prometheus metrics, traces, etc.
+
+**No fallback chains**:
+- If a downstream server is down, tools from that server become unavailable.
+  No automatic failover or retry logic (beyond the initial connection timeout).
